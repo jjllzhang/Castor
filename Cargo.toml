@@ -1,0 +1,32 @@
+[package]
+name = "castor"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = ["parallel"]
+parallel = ["p3-maybe-rayon/parallel", "p3-binary-qa/parallel", "dep:rayon"]
+
+[dependencies]
+p3-binary-qa = { git = "https://github.com/jjllzhang/plonky3-binary-qa.git", branch = "main" }
+p3-field = { git = "https://github.com/Plonky3/Plonky3.git", rev = "0d803737b681774186cd283b1fd2d8e493655c82" }
+p3-binary-field = { git = "https://github.com/Plonky3/Plonky3.git", rev = "0d803737b681774186cd283b1fd2d8e493655c82" }
+p3-matrix = { git = "https://github.com/Plonky3/Plonky3.git", rev = "0d803737b681774186cd283b1fd2d8e493655c82" }
+p3-maybe-rayon = { git = "https://github.com/Plonky3/Plonky3.git", rev = "0d803737b681774186cd283b1fd2d8e493655c82" }
+p3-binary-dft = { git = "https://github.com/Plonky3/Plonky3.git", rev = "0d803737b681774186cd283b1fd2d8e493655c82" }
+p3-binary-pcs = { git = "https://github.com/Plonky3/Plonky3.git", rev = "0d803737b681774186cd283b1fd2d8e493655c82" }
+p3-commit = { git = "https://github.com/Plonky3/Plonky3.git", rev = "0d803737b681774186cd283b1fd2d8e493655c82" }
+p3-util = { git = "https://github.com/Plonky3/Plonky3.git", rev = "0d803737b681774186cd283b1fd2d8e493655c82" }
+blake3 = "1.5"
+clap = { version = "4.5", features = ["derive"] }
+rand = "0.10.1"
+rayon = { version = "1.12", optional = true }
+
+[dev-dependencies]
+criterion = "0.8"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
