@@ -7,7 +7,7 @@ Castor implements two multilinear polynomial commitment schemes based on systema
 | Brakedown | Near-square | Two row combinations and authenticated columns |
 | Quasar | Flat | Row evaluations, one spectrum commitment, a cubic sumcheck, authenticated columns, and one batched FRI-Binius opening |
 
-Quasar uses a flat layout with logarithmically many rows. With fixed rates, fold step, and query budgets, its communication and verifier work grow as $O(\log^2 N)$. The prover reuses the linearity of the QA encoder to work with a single folded spectrum. Brakedown verifies by re-encoding the two supplied rows.
+Both schemes spend $\Theta(N\log K)$ on the main commitment at fixed QA rate, where $K$ is the length of a message row. Quasar uses $h=\Theta(\log N)$ rows and works with a single folded spectrum. Its prover's opening work on the full tables is $O(N+K\log K)=O(N)$. With fixed rates, fold step, query budgets, and cap sizes, query authentication adds at most $O(\log^2 N)$ work, and the proof size and verifier work are also $O(\log^2 N)$. Brakedown verifies by re-encoding the two supplied rows.
 
 ## Usage
 
@@ -29,7 +29,7 @@ cargo bench --locked --bench pcs_comparison
 - `BrakedownQaPcs` opens a known claim with `eval`. It binds the statement, draws the random row weights, and accumulates the two row combinations in one pass through the witness. `evaluate` computes a claim from the committed witness when needed.
 - `QuasarQaPcs` binds the row evaluations before drawing the random row weights. It commits to the resulting spectrum before sampling columns and authenticates those columns before batching the claims. The spectral sumcheck uses a pruned transpose butterfly and a factored inverse kernel. At the endpoint, the verifier evaluates the selectors with four-bit lookup tables. `verifier()` produces a compact verification key.
 - The backend encodes Boolean table values as novel-basis coefficients over one common Cantor domain. It packs the published spectra into one static tree in their multiplier field. A second, quadratic sumcheck draws fresh challenges for the grouped additive RS folds. Each sampled packet path authenticates the homomorphic combination through the terminal constant.
-- `ProximityBudget` computes finite-code distance and row-projection bounds under independently uniform spectra. The CLI reports the main column and FRI path budgets separately. These numerical bounds pertain to the interactive model. Fiat-Shamir knowledge security requires a separate analysis. The benchmark seeds exist for repeatability.
+- `ProximityBudget` checks the requested per-term budget against both the finite-code distance failure bound and the row-projection bound. The distance estimate assumes independently uniform spectra and uses the QA bound for $\beta>0$. The planner rejects a distance estimate that rounds to the requested threshold. The CLI reports the main column and FRI path budgets separately. These numerical bounds pertain to the interactive model. Fiat-Shamir knowledge security requires a separate analysis. The benchmark seeds exist for repeatability.
 
 Both schemes use sorted, distinct column queries and shared Merkle paths. Optional caps are authenticated under the corresponding root. Proof byte totals are the lengths of the fixed-geometry encoding returned by `to_bytes()`.
 

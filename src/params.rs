@@ -149,11 +149,18 @@ impl ProximityBudget {
             return Err(InvalidParameters("unsupported size or statistical budget"));
         }
         let k = 1 << log_cols;
+        let bits = statistical_bits as f64;
+        let distance_failure_bits = qa_distance_failure_bits(k, inv_rate, mult_bits, distance)?;
+        // Equality after rounding does not establish that the bound meets the target.
+        if distance_failure_bits <= bits {
+            return Err(InvalidParameters(
+                "QA distance bound misses the requested budget",
+            ));
+        }
         let length = k * inv_rate;
         let d0 = (distance * length as f64).ceil() as usize;
         let johnson = -((1.0 - distance).ln() / 3.0).exp_m1();
         let third = (d0 - 1) / 3;
-        let bits = statistical_bits as f64;
         let projected = |e| projection_bits(length, distance, e, mode);
         let radius = if let Some(e) = explicit_radius {
             e
@@ -187,7 +194,7 @@ impl ProximityBudget {
             radius,
             queries,
             projection_bits,
-            distance_failure_bits: qa_distance_failure_bits(k, inv_rate, mult_bits, distance)?,
+            distance_failure_bits,
         })
     }
 }
@@ -262,6 +269,7 @@ fn projection_bits(length: usize, distance: f64, radius: usize, mode: ProximityB
 
 /// Negative base-two log of the finite-code distance failure bound, capped
 /// below by zero. Assumes independent uniform spectra over the multiplier field.
+/// Returns zero when the distance bound's beta > 0 hypothesis fails.
 pub fn qa_distance_failure_bits(
     k: usize,
     rate: usize,
@@ -326,6 +334,21 @@ mod tests {
             let ca_auto = derive(UniqueDecodingCA, None).unwrap();
             assert_eq!((ca_auto.radius, ca_auto.queries), (ca.0, ca.1));
             assert!((ca_auto.projection_bits - ca.2).abs() < 0.0005);
+        }
+    }
+
+    #[test]
+    fn rejects_when_distance_bound_misses_statistical_budget() {
+        let derive = |bits| {
+            ProximityBudget::derive(11, 4, 64, ProximityBoundMode::ClassicalThird, bits, None)
+        };
+        assert_eq!(derive(103).unwrap().queries, 392);
+        assert!(derive(112).is_ok());
+        for bits in [113, 117] {
+            assert_eq!(
+                derive(bits).unwrap_err(),
+                CastorError::InvalidParameters("QA distance bound misses the requested budget")
+            );
         }
     }
 
