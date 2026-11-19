@@ -221,16 +221,32 @@ mod tests {
                     bytes.len(),
                     proof.values_bytes() + proof.authentication_bytes()
                 );
-                if cap == 0 && indices.len() > 1 {
-                    assert!(proof.authentication_bytes() < indices.len() * 3 * 32);
+                // Compare paths truncated at the same height, with the shared cap sent once.
+                let independent = proof.values_bytes()
+                    + (indices.len() * (3 - cap) + proof.cap.len()) * size_of::<Digest>();
+                assert!(bytes.len() <= independent);
+                if indices.len() == 1 {
+                    assert_eq!(bytes.len(), independent);
+                } else if cap == 0 {
+                    assert!(bytes.len() < independent);
                 }
-                if let Some(digest) = proof.siblings.first_mut().or_else(|| proof.cap.first_mut()) {
-                    digest[0] ^= 1;
+
+                for i in 0..proof.values.len() {
+                    let value = proof.values[i];
+                    proof.values[i] += BinaryField64::from_repr(1);
                     assert!(!verify(&tree.root(), &indices, &proof, 4, 3, cap));
-                    proof = tree.open(&values, 4, &indices, cap);
+                    proof.values[i] = value;
                 }
-                proof.values[0] += BinaryField64::from_repr(1);
-                assert!(!verify(&tree.root(), &indices, &proof, 4, 3, cap));
+                for i in 0..proof.siblings.len() {
+                    proof.siblings[i][0] ^= 1;
+                    assert!(!verify(&tree.root(), &indices, &proof, 4, 3, cap));
+                    proof.siblings[i][0] ^= 1;
+                }
+                for i in 0..proof.cap.len() {
+                    proof.cap[i][0] ^= 1;
+                    assert!(!verify(&tree.root(), &indices, &proof, 4, 3, cap));
+                    proof.cap[i][0] ^= 1;
+                }
             }
         }
     }

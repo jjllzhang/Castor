@@ -403,10 +403,28 @@ mod tests {
         let mut changed = proof.clone();
         changed.columns.cap[0][0] ^= 1;
         assert!(rejected(&changed));
-        for i in 0..proof.sumcheck.len() {
+        for (i, &round) in proof.sumcheck.iter().enumerate() {
             let mut changed = proof.clone();
-            changed.sumcheck[i].at_omega += F::ONE;
-            assert!(rejected(&changed));
+            for tampered in [
+                CubicMessage {
+                    at_zero: round.at_zero + F::ONE,
+                    ..round
+                },
+                CubicMessage {
+                    at_omega: round.at_omega + F::ONE,
+                    ..round
+                },
+                CubicMessage {
+                    leading: round.leading + F::ONE,
+                    ..round
+                },
+            ] {
+                changed.sumcheck[i] = tampered;
+                assert!(
+                    rejected(&changed),
+                    "accepted a changed cubic message at round {i}"
+                );
+            }
         }
         for i in 0..proof.endpoints.len() {
             let mut changed = proof.clone();
@@ -416,9 +434,18 @@ mod tests {
         let mut changed = proof.clone();
         changed.fri.witness_packets.values[0] += F::ONE;
         assert!(rejected(&changed));
-        let mut changed = proof.clone();
-        changed.fri.layers[0].packets.values[0] += F::ONE;
-        assert!(rejected(&changed));
+        assert!(!proof.fri.layers.is_empty());
+        for (layer, opening) in proof.fri.layers.iter().enumerate() {
+            let mut changed = proof.clone();
+            for (i, &value) in opening.packets.values.iter().enumerate() {
+                changed.fri.layers[layer].packets.values[i] += F::ONE;
+                assert!(
+                    rejected(&changed),
+                    "accepted a changed FRI symbol at layer {layer}, index {i}"
+                );
+                changed.fri.layers[layer].packets.values[i] = value;
+            }
+        }
         let mut changed = proof.clone();
         changed.fri.sumcheck[0][1] += F::ONE;
         assert!(rejected(&changed));
