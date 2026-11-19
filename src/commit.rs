@@ -3,7 +3,7 @@
 use core::any::Any;
 
 use p3_binary_qa::{QaEncoder, QaField};
-use p3_field::{Algebra, ExtensionField};
+use p3_field::ExtensionField;
 use rand::Rng;
 
 use crate::{
@@ -19,16 +19,13 @@ pub(crate) struct ColumnVerifier {
 
 pub(crate) struct Code<E, M> {
     pub(crate) verifier: ColumnVerifier,
-    pub(crate) spectra: Vec<M>,
     rows: QaEncoder<E, M>,
-    pub(crate) challenge_rows: QaEncoder<F, M>,
 }
 
 impl<E, M> Code<E, M>
 where
     E: QaField + ExtensionField<M>,
     M: QaField,
-    F: Algebra<M>,
 {
     pub(crate) fn new(params: PcsParams, spectra: Vec<M>) -> Result<Self, CastorError> {
         if spectra.len() != params.encoded_cols() - params.cols() {
@@ -41,17 +38,13 @@ where
         hasher.update(&(M::NUM_BYTES as u64).to_le_bytes());
         update_fields(&mut hasher, &spectra);
         let id = *hasher.finalize().as_bytes();
-        let rows = QaEncoder::new(params.log_cols(), params.log_inv_rate(), spectra.clone());
-        let challenge_rows =
-            QaEncoder::new(params.log_cols(), params.log_inv_rate(), spectra.clone());
+        let rows = QaEncoder::new(params.log_cols(), params.log_inv_rate(), spectra);
         Ok(Self {
             verifier: ColumnVerifier {
                 params,
                 code_id: id,
             },
-            spectra,
             rows,
-            challenge_rows,
         })
     }
 

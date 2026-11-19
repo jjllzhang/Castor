@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use p3_binary_qa::QaField;
+use p3_binary_qa::{QaEncoder, QaField};
 use p3_field::{Algebra, ExtensionField};
 use rand::Rng;
 
@@ -16,6 +16,7 @@ use crate::{
 
 pub struct BrakedownQaPcs<E = F, M = E> {
     code: Code<E, M>,
+    challenge_rows: QaEncoder<F, M>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -55,8 +56,11 @@ where
     }
 
     pub fn from_spectra(params: PcsParams, spectra: Vec<M>) -> Result<Self, CastorError> {
+        let code = Code::new(params, spectra.clone())?;
+        let challenge_rows = QaEncoder::new(params.log_cols(), params.log_inv_rate(), spectra);
         Ok(Self {
-            code: Code::new(params, spectra)?,
+            code,
+            challenge_rows,
         })
     }
 
@@ -189,8 +193,8 @@ where
         let main_authentication = start.elapsed();
 
         let start = Instant::now();
-        let u = self.code.challenge_rows.encode(&proof.proximity_row);
-        let w = self.code.challenge_rows.encode(&proof.evaluation_row);
+        let u = self.challenge_rows.encode(&proof.proximity_row);
+        let w = self.challenge_rows.encode(&proof.evaluation_row);
         let reencode = start.elapsed();
         let chi = eq_table(row_point);
         for (&j, column) in indices
