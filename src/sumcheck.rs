@@ -1,5 +1,7 @@
 //! Cubic spectral sumcheck with a separable inverse tensor kernel.
 
+use std::borrow::Cow;
+
 use p3_binary_qa::QaButterflyValue;
 use p3_field::PrimeCharacteristicRing;
 use p3_maybe_rayon::prelude::*;
@@ -62,13 +64,13 @@ fn add(a: [F; 3], b: [F; 3]) -> [F; 3] {
     [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
 }
 
-struct SpectralTables {
-    witness: Vec<F>,
+struct SpectralTables<'a> {
+    witness: Cow<'a, [F]>,
     selectors: Vec<Vec<F>>,
-    spectra: Vec<Vec<F>>,
+    spectra: Vec<Cow<'a, [F]>>,
 }
 
-impl SpectralTables {
+impl SpectralTables<'_> {
     fn measure(&self, factors: &[[F; 2]], prefix: F) -> CubicMessage {
         let [lo, hi] = factors[0];
         let d0 = prefix * lo;
@@ -121,9 +123,12 @@ impl SpectralTables {
     }
 
     fn bind(&mut self, point: F) {
-        self.witness = fold_table(&self.witness, point);
-        for table in self.selectors.iter_mut().chain(&mut self.spectra) {
+        self.witness = Cow::Owned(fold_table(&self.witness, point));
+        for table in &mut self.selectors {
             *table = fold_table(table, point);
+        }
+        for table in &mut self.spectra {
+            *table = Cow::Owned(fold_table(table, point));
         }
     }
 }
@@ -135,17 +140,20 @@ pub(crate) struct CubicOpening {
 }
 
 pub(crate) fn prove(
-    witness: Vec<F>,
+    witness: &[F],
     selectors: Vec<Vec<F>>,
-    spectra: Vec<Vec<F>>,
+    spectra: &[F],
     target: &[F],
     power: F,
     transcript: &mut Transcript,
 ) -> CubicOpening {
     let mut tables = SpectralTables {
-        witness,
+        witness: Cow::Borrowed(witness),
         selectors,
-        spectra,
+        spectra: spectra
+            .chunks_exact(witness.len())
+            .map(Cow::Borrowed)
+            .collect(),
     };
     let factors = inverse_factors(target);
     let mut prefix = power;
@@ -211,9 +219,9 @@ mod tests {
             .collect();
         let power = F::from_repr(305);
         let mut tables = SpectralTables {
-            witness: table(1),
+            witness: table(1).into(),
             selectors: vec![table(2), table(3), table(4)],
-            spectra: vec![table(5), table(6)],
+            spectra: vec![table(5).into(), table(6).into()],
         };
         let mut kernel: Vec<_> = (0..1 << bits)
             .map(|i| {

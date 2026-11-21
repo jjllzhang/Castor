@@ -17,7 +17,7 @@ mod transcript;
 pub use brakedown::{BrakedownProof, BrakedownQaPcs};
 pub use commit::CommitmentData;
 pub use fri_binius::{FriBudget, FriConfig, FriProof, FriRound};
-pub use merkle::{Digest, MultiOpening};
+pub use merkle::{Digest, MainOpening, MultiOpening};
 pub use metrics::{EvalTimings, ProofSizeBreakdown, VerifyTimings};
 pub use params::{
     CastorError, PcsParams, ProximityBoundMode, ProximityBudget, qa_distance_failure_bits,

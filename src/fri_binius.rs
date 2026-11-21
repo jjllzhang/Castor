@@ -259,15 +259,15 @@ where
     pub(crate) fn prove(
         &self,
         encoded: &Encoded,
-        witness: &[F],
+        mut message: Vec<F>,
         spectra: &[M],
         point: &[F],
         beta: F,
         transcript: &mut Transcript,
     ) -> FriProof<M> {
         let powers = beta_powers(beta, self.verifier.spectra_count);
-        let mut message = witness.to_vec();
-        for (&power, table) in powers.iter().zip(spectra.chunks_exact(witness.len())) {
+        let cols = message.len();
+        for (&power, table) in powers.iter().zip(spectra.chunks_exact(cols)) {
             message
                 .par_iter_mut()
                 .zip(table.par_iter())
@@ -625,7 +625,14 @@ mod tests {
             .unwrap();
             let data = backend.commit(&witness);
             let transcript = || Transcript::new(b"backend-test");
-            let proof = backend.prove(&data, &witness, &spectra, &point, beta, &mut transcript());
+            let proof = backend.prove(
+                &data,
+                witness.clone(),
+                &spectra,
+                &point,
+                beta,
+                &mut transcript(),
+            );
             backend
                 .verifier
                 .verify(

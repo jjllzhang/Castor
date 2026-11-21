@@ -4,11 +4,12 @@ use core::any::Any;
 
 use p3_binary_qa::{QaEncoder, QaField};
 use p3_field::ExtensionField;
+use p3_maybe_rayon::prelude::*;
 use rand::Rng;
 
 use crate::{
     CastorError, ChallengeField as F, Digest, PcsParams, Transcript,
-    merkle::{MerkleTree, MultiOpening, update_fields, verify},
+    merkle::{MainOpening, MerkleTree, update_fields, verify_split},
 };
 
 #[derive(Clone, Copy)]
@@ -84,18 +85,37 @@ where
         Ok(())
     }
 
-    fn finish_commit<W>(
+    fn finish_commit<W: QaField>(
         &self,
         witness: Vec<W>,
-        codeword: Vec<E>,
+        mut codeword: Vec<E>,
     ) -> (Digest, CommitmentData<W, E>) {
-        let tree = MerkleTree::new(&codeword, self.verifier.params.rows());
+        let rows = self.verifier.params.rows();
+        let tree = if W::NUM_BYTES == E::NUM_BYTES {
+            // The full-width encoder already has the exact Merkle leaf layout.
+            MerkleTree::new(&codeword, rows)
+        } else {
+            // Each contiguous parity block is disjoint from the block being
+            // overwritten. Finish shifting one block before reusing its space.
+            let mut blocks = codeword.chunks_exact_mut(witness.len());
+            let mut dest = blocks.next().unwrap();
+            for source in blocks {
+                dest.par_chunks_mut(4096)
+                    .zip(source.par_chunks(4096))
+                    .with_min_len(16)
+                    .for_each(|(dst, src)| dst.copy_from_slice(src));
+                dest = source;
+            }
+            codeword.truncate(codeword.len() - witness.len());
+            codeword.shrink_to_fit();
+            MerkleTree::new_split(&witness, &codeword, rows)
+        };
         let root = tree.root();
         (
             root,
             CommitmentData {
                 witness,
-                codeword,
+                encoded: codeword,
                 tree,
                 params: self.verifier.params,
                 code_id: self.verifier.code_id,
@@ -121,7 +141,7 @@ where
 }
 
 impl ColumnVerifier {
-    pub(crate) fn begin<E: QaField>(
+    pub(crate) fn begin<W: QaField, E: QaField>(
         &self,
         transcript: &mut Transcript,
         scheme: &[u8],
@@ -143,23 +163,27 @@ impl ColumnVerifier {
             b"shape",
             &shape.map(|v| v as u64).map(u64::to_le_bytes).concat(),
         );
+        if W::NUM_BYTES != E::NUM_BYTES {
+            transcript.absorb(b"systematic-width", &(W::NUM_BYTES as u64).to_le_bytes());
+        }
         transcript.absorb(b"spectra", &self.code_id);
         transcript.absorb(b"main-root", root);
         transcript.absorb_fields(b"point", point);
         transcript.absorb_fields(b"value", &[y]);
     }
 
-    pub(crate) fn verify_columns<E: QaField>(
+    pub(crate) fn verify_columns<W: QaField, E: QaField>(
         &self,
         root: &Digest,
         indices: &[usize],
-        opening: &MultiOpening<E>,
+        opening: &MainOpening<W, E>,
     ) -> Result<(), CastorError> {
-        if verify(
+        if verify_split(
             root,
             indices,
             opening,
             self.params.rows(),
+            self.params.cols(),
             self.params.log_encoded_cols(),
             self.params.cap_log(),
         ) {
@@ -180,23 +204,30 @@ pub(crate) fn sample_spectra<M: QaField>(params: PcsParams, rng: &mut impl Rng) 
         .collect()
 }
 
-/// Retained witness, codeword, and Merkle data required to open a commitment.
+/// Retained witness, encoded columns, and Merkle data required to open a commitment.
 pub struct CommitmentData<W, E> {
     pub(crate) witness: Vec<W>,
-    codeword: Vec<E>,
+    // The mixed-width path removes the widened systematic prefix.
+    encoded: Vec<E>,
     tree: MerkleTree,
     params: PcsParams,
     code_id: Digest,
 }
 
-impl<W, E: QaField> CommitmentData<W, E> {
+impl<W: QaField, E: QaField> CommitmentData<W, E> {
     pub fn root(&self) -> Digest {
         self.tree.root()
     }
 
-    pub(crate) fn open_columns(&self, indices: &[usize]) -> MultiOpening<E> {
-        self.tree.open(
-            &self.codeword,
+    pub(crate) fn open_columns(&self, indices: &[usize]) -> MainOpening<W, E> {
+        let parity_start = if W::NUM_BYTES == E::NUM_BYTES {
+            self.witness.len()
+        } else {
+            0
+        };
+        self.tree.open_split(
+            &self.witness,
+            &self.encoded[parity_start..],
             self.params.rows(),
             indices,
             self.params.cap_log(),

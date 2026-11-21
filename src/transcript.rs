@@ -30,6 +30,15 @@ impl Transcript {
         update_fields(&mut self.state, values);
     }
 
+    pub(crate) fn absorb_main_columns<W: TowerLevel, E: TowerLevel>(
+        &mut self,
+        columns: &crate::MainOpening<W, E>,
+    ) {
+        self.frame(b"opened-columns", columns.values_bytes());
+        update_fields(&mut self.state, &columns.systematic);
+        update_fields(&mut self.state, &columns.parity);
+    }
+
     fn frame(&mut self, label: &[u8], len: usize) {
         self.state.update(&(label.len() as u64).to_le_bytes());
         self.state.update(label);

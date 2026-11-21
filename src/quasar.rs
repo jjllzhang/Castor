@@ -1,11 +1,13 @@
 //! Quasar opening by switching to one committed spectrum and a cubic sumcheck.
 
+use core::any::Any;
 use core::marker::PhantomData;
 use std::time::Instant;
 
 use p3_binary_dft::EncodableLevel;
 use p3_binary_qa::{QaField, forward_transform};
 use p3_field::{Algebra, ExtensionField, PrimeCharacteristicRing};
+use p3_maybe_rayon::prelude::*;
 use rand::Rng;
 
 use crate::commit::{Code, ColumnVerifier, sample_spectra};
@@ -16,13 +18,14 @@ use crate::sumcheck;
 use crate::tensor_kernel::{inverse_kernel, selector_tables, selector_values};
 use crate::{
     CastorError, ChallengeField as F, CommitmentData, CubicMessage, Digest, EvalTimings, FriConfig,
-    FriProof, MultiOpening, PcsParams, ProofSizeBreakdown, Transcript, VerifyTimings,
+    FriProof, MainOpening, PcsParams, ProofSizeBreakdown, Transcript, VerifyTimings,
 };
 
 pub struct QuasarQaPcs<E = F, M = E> {
     code: Code<E, M>,
     backend: FriBackend<M>,
     spectra: Vec<M>,
+    promoted_spectra: Option<Vec<F>>,
 }
 
 /// Public Quasar verification key. It retains the code identifier and static FRI root.
@@ -34,16 +37,16 @@ pub struct QuasarVerifier<E = F, M = E> {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct QuasarProof<E = F, M = E> {
+pub struct QuasarProof<E = F, M = E, W = E> {
     pub row_evaluations: Vec<F>,
     pub spectrum_root: Digest,
-    pub columns: MultiOpening<E>,
+    pub columns: MainOpening<W, E>,
     pub sumcheck: Vec<CubicMessage>,
     pub endpoints: Vec<F>,
     pub fri: FriProof<M>,
 }
 
-impl<E: QaField, M: QaField> QuasarProof<E, M> {
+impl<E: QaField, M: QaField, W: QaField> QuasarProof<E, M, W> {
     pub fn size(&self) -> ProofSizeBreakdown {
         ProofSizeBreakdown {
             row_evaluations: 16 * self.row_evaluations.len(),
@@ -92,10 +95,16 @@ where
     ) -> Result<Self, CastorError> {
         let code = Code::new(params, spectra.clone())?;
         let backend = FriBackend::setup(fri, params.log_cols(), &spectra)?;
+        let promoted_spectra = if (&spectra as &dyn Any).is::<Vec<F>>() {
+            None
+        } else {
+            Some(spectra.par_iter().copied().map(F::from).collect())
+        };
         Ok(Self {
             code,
             backend,
             spectra,
+            promoted_spectra,
         })
     }
 
@@ -128,12 +137,16 @@ where
         self.code.commit_full(witness)
     }
 
+    #[expect(
+        clippy::type_complexity,
+        reason = "The opening carries its claim and timings."
+    )]
     pub fn eval<W: QaField>(
         &self,
         data: &CommitmentData<W, E>,
         point: &[F],
         transcript: &mut Transcript,
-    ) -> Result<(F, QuasarProof<E, M>, EvalTimings), CastorError>
+    ) -> Result<(F, QuasarProof<E, M, W>, EvalTimings), CastorError>
     where
         F: Algebra<W>,
     {
@@ -147,7 +160,7 @@ where
         let row_time = start.elapsed();
         let rho = self
             .verifier()
-            .begin(&data.root(), point, y, &row_evaluations, transcript);
+            .begin::<W>(&data.root(), point, y, &row_evaluations, transcript);
 
         let start = Instant::now();
         let mut spectrum = fold_row(&data.witness, &rho);
@@ -171,26 +184,19 @@ where
         let selectors_time = start.elapsed();
 
         let start = Instant::now();
-        let spectra = self
-            .spectra
-            .chunks_exact(params.cols())
-            .map(|slice| slice.iter().copied().map(F::from).collect())
-            .collect();
-        let cubic = sumcheck::prove(
-            spectrum.clone(),
-            selectors,
-            spectra,
-            col_point,
-            power,
-            transcript,
-        );
+        let spectra = self.promoted_spectra.as_deref().unwrap_or_else(|| {
+            (&self.spectra as &dyn Any)
+                .downcast_ref::<Vec<F>>()
+                .unwrap()
+        });
+        let cubic = sumcheck::prove(&spectrum, selectors, spectra, col_point, power, transcript);
         let sumcheck_time = start.elapsed();
 
         let start = Instant::now();
         let beta = backend_challenge(&cubic.endpoints, transcript);
         let fri = self.backend.prove(
             &encoded,
-            &spectrum,
+            spectrum,
             &self.spectra,
             &cubic.point,
             beta,
@@ -220,14 +226,17 @@ where
         ))
     }
 
-    pub fn verify(
+    pub fn verify<W: QaField>(
         &self,
         root: &Digest,
         point: &[F],
         y: F,
-        proof: &QuasarProof<E, M>,
+        proof: &QuasarProof<E, M, W>,
         transcript: &mut Transcript,
-    ) -> Result<VerifyTimings, CastorError> {
+    ) -> Result<VerifyTimings, CastorError>
+    where
+        F: Algebra<W>,
+    {
         self.verifier().verify(root, point, y, proof, transcript)
     }
 }
@@ -236,14 +245,17 @@ impl<E: QaField, M: QaField + EncodableLevel> QuasarVerifier<E, M>
 where
     F: Algebra<E> + Algebra<M>,
 {
-    pub fn verify(
+    pub fn verify<W: QaField>(
         &self,
         root: &Digest,
         point: &[F],
         y: F,
-        proof: &QuasarProof<E, M>,
+        proof: &QuasarProof<E, M, W>,
         transcript: &mut Transcript,
-    ) -> Result<VerifyTimings, CastorError> {
+    ) -> Result<VerifyTimings, CastorError>
+    where
+        F: Algebra<W>,
+    {
         use CastorError::InvalidProof;
         let params = self.column.params;
         if point.len() != params.ell()
@@ -260,7 +272,7 @@ where
             ));
         }
 
-        let rho = self.begin(root, point, y, &proof.row_evaluations, transcript);
+        let rho = self.begin::<W>(root, point, y, &proof.row_evaluations, transcript);
         let indices = self.get_columns(&proof.spectrum_root, transcript);
         let start = Instant::now();
         self.column.verify_columns(root, &indices, &proof.columns)?;
@@ -269,8 +281,21 @@ where
 
         let mut initial = F::ZERO;
         let mut power = F::ONE;
-        for values in proof.columns.values.chunks_exact(params.rows()) {
-            initial += power * dot(&rho, values);
+        let rows = params.rows();
+        let evaluations = proof
+            .columns
+            .systematic
+            .chunks_exact(rows)
+            .map(|col| dot(&rho, col))
+            .chain(
+                proof
+                    .columns
+                    .parity
+                    .chunks_exact(rows)
+                    .map(|col| dot(&rho, col)),
+            );
+        for evaluation in evaluations {
+            initial += power * evaluation;
             power *= tau;
         }
         initial += power * dot::<F>(&rho, &proof.row_evaluations);
@@ -304,7 +329,7 @@ where
         })
     }
 
-    fn begin(
+    fn begin<W: QaField>(
         &self,
         root: &Digest,
         point: &[F],
@@ -313,7 +338,7 @@ where
         transcript: &mut Transcript,
     ) -> Vec<F> {
         self.column
-            .begin::<E>(transcript, b"quasar/v1", root, point, y);
+            .begin::<W, E>(transcript, b"quasar/v1", root, point, y);
         self.fri.bind_parameters(transcript);
         transcript.absorb_fields(b"row-evaluations", rows);
         transcript.fields(b"rho", rows.len())
@@ -329,8 +354,11 @@ where
     }
 }
 
-fn column_challenge<E: QaField>(columns: &MultiOpening<E>, transcript: &mut Transcript) -> F {
-    transcript.absorb_fields(b"opened-columns", &columns.values);
+fn column_challenge<W: QaField, E: QaField>(
+    columns: &MainOpening<W, E>,
+    transcript: &mut Transcript,
+) -> F {
+    transcript.absorb_main_columns(columns);
     transcript.field(b"selector-tau")
 }
 
@@ -371,6 +399,7 @@ mod tests {
         assert_eq!(
             proof.size().opened_main_columns,
             params.num_queries() * params.rows() * E::NUM_BYTES
+                - proof.columns.systematic.len() * (E::NUM_BYTES - W::NUM_BYTES)
         );
         assert_eq!(proof.size().total_bytes(), proof.to_bytes().len());
         pcs.verify(&root, &z, y, &proof, &mut transcript()).unwrap();
@@ -378,12 +407,17 @@ mod tests {
             .commit_full(witness.iter().copied().map(E::from).collect())
             .unwrap();
         let (promoted_y, promoted_proof, _) = pcs.eval(&promoted, &z, &mut transcript()).unwrap();
-        assert_eq!(
-            (promoted_root, promoted_y, &promoted_proof),
-            (root, y, &proof)
-        );
+        assert_eq!(promoted_y, y);
+        if W::NUM_BYTES == E::NUM_BYTES {
+            assert_eq!(promoted_root, root);
+            assert_eq!(promoted_proof.to_bytes(), proof.to_bytes());
+        } else {
+            assert_ne!(promoted_root, root);
+        }
+        pcs.verify(&promoted_root, &z, y, &promoted_proof, &mut transcript())
+            .unwrap();
 
-        let rejected = |changed: &QuasarProof<E, M>| {
+        let rejected = |changed: &QuasarProof<E, M, W>| {
             pcs.verify(&root, &z, y, changed, &mut transcript())
                 .is_err()
         };
@@ -398,7 +432,7 @@ mod tests {
         changed.spectrum_root[0] ^= 1;
         assert!(rejected(&changed));
         let mut changed = proof.clone();
-        changed.columns.values[0] += E::ONE;
+        changed.columns.parity[0] += E::ONE;
         assert!(rejected(&changed));
         let mut changed = proof.clone();
         changed.columns.cap[0][0] ^= 1;
