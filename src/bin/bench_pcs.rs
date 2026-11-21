@@ -317,13 +317,13 @@ where
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
-    if !(2..=24).contains(&args.m)
+    if !(2..=28).contains(&args.m)
         || !matches!(args.c, 2 | 4)
         || args.threads == 0
         || args.iters == 0
         || args.warmup.checked_add(args.iters).is_none()
     {
-        return Err("expected m=2..24, c=2 or 4, and positive threads and iterations".into());
+        return Err("expected m=2..28, c=2 or 4, and positive threads and iterations".into());
     }
     #[cfg(feature = "parallel")]
     rayon::ThreadPoolBuilder::new()

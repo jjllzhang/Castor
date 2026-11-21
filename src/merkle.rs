@@ -76,6 +76,42 @@ impl<F: TowerLevel> MultiOpening<F> {
     }
 }
 
+/// Main commitment columns in query order, with systematic entries in the witness field.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MainOpening<W, E = W> {
+    pub systematic: Vec<W>,
+    pub parity: Vec<E>,
+    pub siblings: Vec<Digest>,
+    pub cap: Vec<Digest>,
+}
+
+impl<W: TowerLevel, E: TowerLevel> MainOpening<W, E> {
+    pub fn values_bytes(&self) -> usize {
+        self.systematic.len() * W::NUM_BYTES + self.parity.len() * E::NUM_BYTES
+    }
+
+    pub fn authentication_bytes(&self) -> usize {
+        (self.siblings.len() + self.cap.len()) * size_of::<Digest>()
+    }
+
+    pub(crate) fn write_bytes(&self, out: &mut Vec<u8>) {
+        stream_fields(&self.systematic, |bytes| out.extend_from_slice(bytes));
+        stream_fields(&self.parity, |bytes| out.extend_from_slice(bytes));
+        out.extend_from_slice(self.siblings.as_flattened());
+        out.extend_from_slice(self.cap.as_flattened());
+    }
+}
+
+fn packets<F: TowerLevel>(values: &[F], width: usize, indices: &[usize], first: usize) -> Vec<F> {
+    indices
+        .iter()
+        .flat_map(|&index| {
+            let start = (index - first) * width;
+            values[start..start + width].iter().copied()
+        })
+        .collect()
+}
+
 impl MerkleTree {
     pub(crate) fn new<F: TowerLevel>(values: &[F], width: usize) -> Self {
         assert_eq!(values.len() % width, 0);
@@ -85,7 +121,28 @@ impl MerkleTree {
             .with_min_len(8)
             .map(leaf)
             .collect();
-        let mut levels: Vec<Vec<Digest>> = vec![leaves];
+        Self::from_leaves(leaves)
+    }
+
+    pub(crate) fn new_split<W: TowerLevel, E: TowerLevel>(
+        systematic: &[W],
+        parity: &[E],
+        width: usize,
+    ) -> Self {
+        assert_eq!(systematic.len() % width, 0);
+        assert_eq!(parity.len() % width, 0);
+        assert!(((systematic.len() + parity.len()) / width).is_power_of_two());
+        let leaves = systematic
+            .par_chunks_exact(width)
+            .with_min_len(8)
+            .map(leaf)
+            .chain(parity.par_chunks_exact(width).with_min_len(8).map(leaf))
+            .collect();
+        Self::from_leaves(leaves)
+    }
+
+    fn from_leaves(leaves: Vec<Digest>) -> Self {
+        let mut levels = vec![leaves];
         while levels.last().unwrap().len() > 1 {
             levels.push(parents(levels.last().unwrap()));
         }
@@ -104,6 +161,34 @@ impl MerkleTree {
         indices: &[usize],
         cap_log: usize,
     ) -> MultiOpening<F> {
+        let (siblings, cap) = self.open_path(indices, cap_log);
+        MultiOpening {
+            values: packets(values, width, indices, 0),
+            siblings,
+            cap,
+        }
+    }
+
+    pub(crate) fn open_split<W: TowerLevel, E: TowerLevel>(
+        &self,
+        systematic: &[W],
+        parity: &[E],
+        width: usize,
+        indices: &[usize],
+        cap_log: usize,
+    ) -> MainOpening<W, E> {
+        let systematic_cols = systematic.len() / width;
+        let split = indices.partition_point(|&j| j < systematic_cols);
+        let (siblings, cap) = self.open_path(indices, cap_log);
+        MainOpening {
+            systematic: packets(systematic, width, &indices[..split], 0),
+            parity: packets(parity, width, &indices[split..], systematic_cols),
+            siblings,
+            cap,
+        }
+    }
+
+    fn open_path(&self, indices: &[usize], cap_log: usize) -> (Vec<Digest>, Vec<Digest>) {
         let stop_level = self.levels.len() - 1 - cap_log;
         let mut active = indices.to_vec();
         let mut siblings = Vec::new();
@@ -127,14 +212,7 @@ impl MerkleTree {
         } else {
             self.levels[stop_level].clone()
         };
-        MultiOpening {
-            values: indices
-                .iter()
-                .flat_map(|&index| values[index * width..(index + 1) * width].iter().copied())
-                .collect(),
-            siblings,
-            cap,
-        }
+        (siblings, cap)
     }
 }
 
@@ -146,20 +224,73 @@ pub(crate) fn verify<F: TowerLevel>(
     log_leaves: usize,
     cap_log: usize,
 ) -> bool {
-    if indices.is_empty()
-        || indices.windows(2).any(|w| w[0] >= w[1])
-        || *indices.last().unwrap() >= 1 << log_leaves
-        || opening.values.len() != indices.len() * width
-        || opening.cap.len() != if cap_log == 0 { 0 } else { 1 << cap_log }
-    {
+    if !valid_indices(indices, log_leaves) || opening.values.len() != indices.len() * width {
         return false;
     }
-    let mut active: Vec<_> = indices
+    let active = indices
         .iter()
         .copied()
         .zip(opening.values.chunks_exact(width).map(leaf))
         .collect();
-    let mut siblings = opening.siblings.iter();
+    verify_path(
+        root,
+        active,
+        &opening.siblings,
+        &opening.cap,
+        log_leaves,
+        cap_log,
+    )
+}
+
+pub(crate) fn verify_split<W: TowerLevel, E: TowerLevel>(
+    root: &Digest,
+    indices: &[usize],
+    opening: &MainOpening<W, E>,
+    width: usize,
+    systematic_cols: usize,
+    log_leaves: usize,
+    cap_log: usize,
+) -> bool {
+    let split = indices.partition_point(|&j| j < systematic_cols);
+    if !valid_indices(indices, log_leaves)
+        || opening.systematic.len() != split * width
+        || opening.parity.len() != (indices.len() - split) * width
+    {
+        return false;
+    }
+    let leaves = opening
+        .systematic
+        .chunks_exact(width)
+        .map(leaf)
+        .chain(opening.parity.chunks_exact(width).map(leaf));
+    let active = indices.iter().copied().zip(leaves).collect();
+    verify_path(
+        root,
+        active,
+        &opening.siblings,
+        &opening.cap,
+        log_leaves,
+        cap_log,
+    )
+}
+
+fn valid_indices(indices: &[usize], log_leaves: usize) -> bool {
+    indices.last().is_some_and(|&last| last < 1 << log_leaves)
+        && indices.windows(2).all(|pair| pair[0] < pair[1])
+}
+
+fn verify_path(
+    root: &Digest,
+    mut active: Vec<(usize, Digest)>,
+    siblings: &[Digest],
+    cap: &[Digest],
+    log_leaves: usize,
+    cap_log: usize,
+) -> bool {
+    if cap.len() != if cap_log == 0 { 0 } else { 1 << cap_log } {
+        return false;
+    }
+    let mut siblings = siblings.iter();
     for _ in 0..log_leaves - cap_log {
         let mut next = Vec::with_capacity(active.len());
         let mut items = active.into_iter().peekable();
@@ -187,13 +318,10 @@ pub(crate) fn verify<F: TowerLevel>(
     if cap_log == 0 {
         return active == [(0, *root)];
     }
-    if active
-        .iter()
-        .any(|&(index, digest)| opening.cap[index] != digest)
-    {
+    if active.iter().any(|&(index, digest)| cap[index] != digest) {
         return false;
     }
-    let mut level = opening.cap.clone();
+    let mut level = parents(cap);
     while level.len() > 1 {
         level = parents(&level);
     }

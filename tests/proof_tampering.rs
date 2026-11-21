@@ -1,6 +1,6 @@
 use castor::{
-    BrakedownProof, BrakedownQaPcs, CastorError, ChallengeField as F, FriConfig, MultiOpening,
-    PcsParams, QuasarProof, QuasarQaPcs, Transcript, VerifyTimings,
+    BrakedownProof, BrakedownQaPcs, CastorError, ChallengeField as F, FriConfig, MainOpening,
+    MultiOpening, PcsParams, QuasarProof, QuasarQaPcs, Transcript, VerifyTimings,
 };
 use p3_binary_field::{BinaryField16, BinaryField64, TowerLevel};
 use rand::{SeedableRng, rngs::StdRng};
@@ -28,6 +28,13 @@ impl ByteFlip {
             bytes[offset % T::NUM_BYTES] ^= 1;
             *field = T::from_le_byte_iter(bytes.into_iter());
         }
+    }
+
+    fn main_opening<W: TowerLevel, E: TowerLevel>(&mut self, opening: &mut MainOpening<W, E>) {
+        self.fields(&mut opening.systematic);
+        self.fields(&mut opening.parity);
+        self.bytes(opening.siblings.as_flattened_mut());
+        self.bytes(opening.cap.as_flattened_mut());
     }
 
     fn opening<T: TowerLevel>(&mut self, opening: &mut MultiOpening<T>) {
@@ -84,7 +91,10 @@ fn brakedown_rejects_a_flip_at_every_serialized_proof_byte() {
     let y = pcs.evaluate(&data, &point).unwrap();
     let transcript = || Transcript::new(b"brakedown/byte-tampering");
     let (proof, _) = pcs.eval(&data, &point, y, &mut transcript()).unwrap();
-    assert_siblings_and_cap(&proof.columns);
+    assert!(!proof.columns.systematic.is_empty());
+    assert!(!proof.columns.parity.is_empty());
+    assert!(!proof.columns.siblings.is_empty());
+    assert!(!proof.columns.cap.is_empty());
 
     assert_rejects_each_serialized_byte(
         &proof,
@@ -92,7 +102,7 @@ fn brakedown_rejects_a_flip_at_every_serialized_proof_byte() {
         |proof, flip| {
             flip.fields(&mut proof.proximity_row);
             flip.fields(&mut proof.evaluation_row);
-            flip.opening(&mut proof.columns);
+            flip.main_opening(&mut proof.columns);
         },
         |proof| pcs.verify(&root, &point, y, proof, &mut transcript()),
     );
@@ -115,7 +125,10 @@ fn quasar_rejects_a_flip_at_every_serialized_proof_byte() {
     let transcript = || Transcript::new(b"quasar/byte-tampering");
     let (y, proof, _) = pcs.eval(&data, &point, &mut transcript()).unwrap();
     let verifier = pcs.verifier();
-    assert_siblings_and_cap(&proof.columns);
+    assert!(!proof.columns.systematic.is_empty());
+    assert!(!proof.columns.parity.is_empty());
+    assert!(!proof.columns.siblings.is_empty());
+    assert!(!proof.columns.cap.is_empty());
     assert_siblings_and_cap(&proof.fri.witness_packets);
     assert_siblings_and_cap(&proof.fri.parameter_packets);
     assert_eq!(proof.fri.layers.len(), 2);
@@ -129,7 +142,7 @@ fn quasar_rejects_a_flip_at_every_serialized_proof_byte() {
         |proof, flip| {
             flip.fields(&mut proof.row_evaluations);
             flip.bytes(&mut proof.spectrum_root);
-            flip.opening(&mut proof.columns);
+            flip.main_opening(&mut proof.columns);
             for round in &mut proof.sumcheck {
                 flip.fields(std::slice::from_mut(&mut round.at_zero));
                 flip.fields(std::slice::from_mut(&mut round.at_omega));

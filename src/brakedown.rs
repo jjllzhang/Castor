@@ -10,7 +10,7 @@ use crate::commit::{Code, sample_spectra};
 use crate::merkle::stream_fields;
 use crate::poly::{dot, eq_table, evaluate, fold_rows};
 use crate::{
-    CastorError, ChallengeField as F, CommitmentData, Digest, EvalTimings, MultiOpening, PcsParams,
+    CastorError, ChallengeField as F, CommitmentData, Digest, EvalTimings, MainOpening, PcsParams,
     ProofSizeBreakdown, Transcript, VerifyTimings,
 };
 
@@ -20,13 +20,13 @@ pub struct BrakedownQaPcs<E = F, M = E> {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BrakedownProof<E = F> {
+pub struct BrakedownProof<E = F, W = E> {
     pub proximity_row: Vec<F>,
     pub evaluation_row: Vec<F>,
-    pub columns: MultiOpening<E>,
+    pub columns: MainOpening<W, E>,
 }
 
-impl<E: QaField> BrakedownProof<E> {
+impl<E: QaField, W: QaField> BrakedownProof<E, W> {
     pub fn size(&self) -> ProofSizeBreakdown {
         ProofSizeBreakdown {
             row_combinations: 16 * (self.proximity_row.len() + self.evaluation_row.len()),
@@ -106,14 +106,14 @@ where
         point: &[F],
         y: F,
         transcript: &mut Transcript,
-    ) -> Result<(BrakedownProof<E>, EvalTimings), CastorError>
+    ) -> Result<(BrakedownProof<E, W>, EvalTimings), CastorError>
     where
         F: Algebra<W>,
     {
         self.code.check_input(data, point)?;
         self.code
             .verifier
-            .begin::<E>(transcript, b"brakedown/v1", &data.root(), point, y);
+            .begin::<W, E>(transcript, b"brakedown/v1", &data.root(), point, y);
         let start = Instant::now();
         let rho = transcript.fields(b"rho", self.code.verifier.params.rows());
         let (row_point, col_point) = point.split_at(self.code.verifier.params.log_rows());
@@ -134,13 +134,13 @@ where
         ))
     }
 
-    fn finish_open<W>(
+    fn finish_open<W: QaField>(
         &self,
         data: &CommitmentData<W, E>,
         transcript: &mut Transcript,
         v: Vec<F>,
         p: Vec<F>,
-    ) -> (BrakedownProof<E>, std::time::Duration) {
+    ) -> (BrakedownProof<E, W>, std::time::Duration) {
         transcript.absorb_fields(b"proximity-row", &v);
         transcript.absorb_fields(b"evaluation-row", &p);
         let start = Instant::now();
@@ -158,14 +158,17 @@ where
         (proof, start.elapsed())
     }
 
-    pub fn verify(
+    pub fn verify<W: QaField>(
         &self,
         root: &Digest,
         point: &[F],
         y: F,
-        proof: &BrakedownProof<E>,
+        proof: &BrakedownProof<E, W>,
         transcript: &mut Transcript,
-    ) -> Result<VerifyTimings, CastorError> {
+    ) -> Result<VerifyTimings, CastorError>
+    where
+        F: Algebra<W>,
+    {
         let params = self.code.verifier.params;
         if point.len() != params.ell()
             || proof.proximity_row.len() != params.cols()
@@ -180,7 +183,7 @@ where
 
         self.code
             .verifier
-            .begin::<E>(transcript, b"brakedown/v1", root, point, y);
+            .begin::<W, E>(transcript, b"brakedown/v1", root, point, y);
         let rho = transcript.fields(b"rho", params.rows());
         transcript.absorb_fields(b"proximity-row", &proof.proximity_row);
         transcript.absorb_fields(b"evaluation-row", &proof.evaluation_row);
@@ -197,11 +200,21 @@ where
         let w = self.challenge_rows.encode(&proof.evaluation_row);
         let reencode = start.elapsed();
         let chi = eq_table(row_point);
-        for (&j, column) in indices
-            .iter()
-            .zip(proof.columns.values.chunks_exact(params.rows()))
-        {
-            if u[j] != dot(&rho, column) || w[j] != dot(&chi, column) {
+        let rows = params.rows();
+        let evaluations = proof
+            .columns
+            .systematic
+            .chunks_exact(rows)
+            .map(|col| (dot(&rho, col), dot(&chi, col)))
+            .chain(
+                proof
+                    .columns
+                    .parity
+                    .chunks_exact(rows)
+                    .map(|col| (dot(&rho, col), dot(&chi, col))),
+            );
+        for (&j, (proximity, evaluation)) in indices.iter().zip(evaluations) {
+            if u[j] != proximity || w[j] != evaluation {
                 return Err(CastorError::InvalidProof("row encoding consistency"));
             }
         }
@@ -220,7 +233,7 @@ mod tests {
     use p3_field::PrimeCharacteristicRing;
 
     #[test]
-    fn full_and_mixed_witnesses_have_identical_proofs_at_same_storage_width() {
+    fn mixed_witness_columns_use_native_width() {
         let params = PcsParams::new(8, 4, 2, 30, 2).unwrap();
         let spectra: Vec<_> = (0..48)
             .map(|i| BinaryField64::from_repr((i * 157 + 11) << 32))
@@ -247,12 +260,20 @@ mod tests {
         let (promoted_proof, _) = pcs
             .eval(&promoted, &z, promoted_y, &mut transcript())
             .unwrap();
-        assert_eq!(
-            (root, y, &proof),
-            (promoted_root, promoted_y, &promoted_proof)
-        );
+        assert_eq!(promoted_y, y);
+        assert_ne!(promoted_root, root);
+        pcs.verify(&promoted_root, &z, y, &promoted_proof, &mut transcript())
+            .unwrap();
         assert_eq!(proof.to_bytes().len(), proof.size().total_bytes());
-        assert_eq!(proof.size().opened_main_columns, 30 * 16 * 8);
+        assert!(!proof.columns.systematic.is_empty());
+        assert_eq!(
+            proof.columns.systematic.len() + proof.columns.parity.len(),
+            30 * 16
+        );
+        assert_eq!(
+            proof.size().opened_main_columns,
+            30 * 16 * 8 - 6 * proof.columns.systematic.len()
+        );
         pcs.verify(&root, &z, y, &proof, &mut transcript()).unwrap();
         let wide_y = wide.evaluate(&wide_data, &z).unwrap();
         let (wide_proof, _) = wide
@@ -279,7 +300,7 @@ mod tests {
                 .is_err()
         );
         let mut changed = proof.clone();
-        changed.columns.values[0] += BinaryField64::ONE;
+        changed.columns.parity[0] += BinaryField64::ONE;
         assert!(
             pcs.verify(&root, &z, y, &changed, &mut transcript())
                 .is_err()
