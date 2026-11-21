@@ -4,6 +4,7 @@ use core::any::Any;
 
 use p3_binary_qa::{QaEncoder, QaField};
 use p3_field::ExtensionField;
+use p3_maybe_rayon::prelude::*;
 use rand::Rng;
 
 use crate::{
@@ -94,7 +95,18 @@ where
             // The full-width encoder already has the exact Merkle leaf layout.
             MerkleTree::new(&codeword, rows)
         } else {
-            codeword.drain(..witness.len());
+            // Each contiguous parity block is disjoint from the block being
+            // overwritten. Finish shifting one block before reusing its space.
+            let mut blocks = codeword.chunks_exact_mut(witness.len());
+            let mut dest = blocks.next().unwrap();
+            for source in blocks {
+                dest.par_chunks_mut(4096)
+                    .zip(source.par_chunks(4096))
+                    .with_min_len(16)
+                    .for_each(|(dst, src)| dst.copy_from_slice(src));
+                dest = source;
+            }
+            codeword.truncate(codeword.len() - witness.len());
             codeword.shrink_to_fit();
             MerkleTree::new_split(&witness, &codeword, rows)
         };
